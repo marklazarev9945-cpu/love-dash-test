@@ -87,25 +87,42 @@
     state.objects=state.objects.filter(o=>!o.handled&&o.z<1.12);
     hud();
   }
-  function roadX(lane,z){const t=Math.max(0,Math.min(1,z));const roadWidth=width*(.22+.72*t);return width/2+(lane-1)*roadWidth/3;}
-  // One perspective function for both gameplay objects and scenery.
-  function projectDepth(z){const depth=Math.max(0,z);return {y:height*.13+(height-height*.13)*depth*depth,scale:depth};}
+  // The painted trapezoid and every world-space anchor share this section.
+  function roadSection(y){
+    const horizon=height*.13,bottom=height*1.04;
+    const roadWidth=width*(.22+.74*(y-horizon)/(bottom-horizon));
+    return {y,left:width/2-roadWidth/2,right:width/2+roadWidth/2,laneWidth:roadWidth/3};
+  }
+  function roadBoundary(boundary,section){return section.left+boundary*section.laneWidth;}
+  function roadX(lane,z){return roadBoundary(lane+.5,projectDepth(z));}
+  function projectDepth(z){
+    const depth=Math.max(0,z),horizon=height*.13;
+    const section=roadSection(horizon+(height-horizon)*depth*depth);
+    const contactY=horizon+(height-horizon)*CONFIG.contactZ*CONFIG.contactZ;
+    const contact=roadSection(contactY);
+    // Uniform CSS-pixel scaling; DPR only controls the backing buffer.
+    // Character bounds include the round caps on the animated legs.
+    const contactScale=Math.max(0,Math.min(1,width/390,(contactY-8)/33,(height-contactY-8)/37));
+    return {...section,scale:contactScale*section.laneWidth/contact.laneWidth};
+  }
+  function parkPlacement(item,z){
+    // Keep the desktop contact size close to the original .89 * 1.25.
+    const proj=projectDepth(z),scale=proj.scale*1.1;
+    // Conservative local bounds include strokes and all illustration parts.
+    const bounds=item.kind==='tree'?[-46,-143,46,1]:item.kind==='lamp'?[-15,-128,15,3]:item.kind==='bench'?[-36,-41,36,3]:[-37,-43,43,7];
+    const [left,top,right,bottom]=bounds;
+    const edge=roadSection(Math.max(height*.13,proj.y+bottom*scale));
+    const gap=proj.laneWidth*(.08+.02*item.variant);
+    const x=item.side<0?edge.left-gap-right*scale:edge.right+gap-left*scale;
+    return {x,y:proj.y,scale,left:x+left*scale,right:x+right*scale,top:proj.y+top*scale,bottom:proj.y+bottom*scale};
+  }
   function decorationFullyBelow(item,z){
     if(z<0)return false;
-    const foot=projectDepth(z).y;
-    const scale=Math.max(.11,z)*Math.min(1.25,width/390);
-    // Tallest illustration is a tree (~142 design pixels above its foot).
-    const topExtent=item.kind==='tree'?145:item.kind==='lamp'?130:item.kind==='bench'?42:46;
-    return foot-topExtent*scale>height+8;
+    return parkPlacement(item,z).top>height+8;
   }
   function parkDecoration(item,z){
     if(z<0||decorationFullyBelow(item,z))return;
-    const proj=projectDepth(z),side=item.side;
-    // Edge follows the same perspective road geometry as the lanes.
-    const roadHalf=width*(.22+.72*Math.min(z,1.20))/2;
-    const x=width/2+side*(roadHalf+width*(PARK.sideOffset+.035*item.variant/4)*Math.max(.17,z));
-    const y=proj.y;
-    const scale=Math.max(.11,z)*Math.min(1.25,width/390);
+    const {x,y,scale}=parkPlacement(item,z);
     ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);
     if(item.kind==='tree'){
       ctx.fillStyle='#927454';ctx.fillRect(-6,-77,12,77);
@@ -131,9 +148,9 @@
     visible.sort((a,b)=>a.z-b.z);
     // Restrict scenery to shoulders: never paint over the playable three lanes.
     ctx.save();
-    const horizon=height*.13;
-    ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(width*.39,0);ctx.lineTo(width*.39,horizon);ctx.lineTo(width*.02,height*1.04);ctx.lineTo(0,height*1.04);ctx.closePath();
-    ctx.moveTo(width,0);ctx.lineTo(width*.61,0);ctx.lineTo(width*.61,horizon);ctx.lineTo(width*.98,height*1.04);ctx.lineTo(width,height*1.04);ctx.closePath();
+    const top=projectDepth(0),bottom=roadSection(height*1.04);
+    ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(top.left,0);ctx.lineTo(top.left,top.y);ctx.lineTo(bottom.left,bottom.y);ctx.lineTo(0,bottom.y);ctx.closePath();
+    ctx.moveTo(width,0);ctx.lineTo(top.right,0);ctx.lineTo(top.right,top.y);ctx.lineTo(bottom.right,bottom.y);ctx.lineTo(width,bottom.y);ctx.closePath();
     ctx.clip();
     for(const {item,z} of visible)parkDecoration(item,z);
     ctx.restore();
@@ -190,13 +207,12 @@
   }
   function drawWorld(index){
     worldBackdrop(index);
-    const w=WORLDS[index],horizon=height*.13,bottom=height*1.04;
-    polygon([[width*.39,horizon],[width*.61,horizon],[width*.98,bottom],[width*.02,bottom]],w.road);
+    const w=WORLDS[index],top=projectDepth(0),bottom=roadSection(height*1.04);
+    polygon([[top.left,top.y],[top.right,top.y],[bottom.right,bottom.y],[bottom.left,bottom.y]],w.road);
     // Static subtle lane separators and edges, shared by all four locations.
     for(let boundary=0;boundary<=3;boundary++){
-      const top=width*(.39+.22*boundary/3),low=width*(.02+.96*boundary/3);
       ctx.strokeStyle=boundary===0||boundary===3?w.edge:'rgba(255,255,255,.47)';ctx.lineWidth=boundary===0||boundary===3?3:2;
-      ctx.beginPath();ctx.moveTo(top,horizon);ctx.lineTo(low,bottom);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(roadBoundary(boundary,top),top.y);ctx.lineTo(roadBoundary(boundary,bottom),bottom.y);ctx.stroke();
     }
   }
   function drawLocationLabel(){
@@ -220,17 +236,15 @@
       drawParkMotion();ctx.restore();
     }
     drawLocationLabel();
-    const horizon=height*.13;
     for(const o of state.objects){
       if(o.handled||o.z<0||o.z>1.08)continue;
-      const z=o.z,y=projectDepth(z).y,x=roadX(o.lane,z),size=Math.max(9,Math.min(width*.12,11+z*38));
+      const z=o.z,proj=projectDepth(z),y=proj.y,x=roadX(o.lane,z),size=(11+CONFIG.contactZ*38)*proj.scale;
       if(o.kind==='heart')heart(x,y,size);
       else if(o.kind==='obstacle')barrier(x,y,size);
       else {ctx.save();ctx.font=`${size}px system-ui`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor='#ffdc62';ctx.shadowBlur=15;ctx.fillText('💍',x,y);ctx.restore();}
     }
-    const px=width/2+(state.visualLane-1)*width*(.22+.72*CONFIG.contactZ)/3;
-    const py=horizon+(height-horizon)*CONFIG.contactZ*CONFIG.contactZ;
-    ctx.save();ctx.translate(px,py);const stride=Math.sin(state.runClock*17)*4;
+    const contact=projectDepth(CONFIG.contactZ),px=roadX(state.visualLane,CONFIG.contactZ),py=contact.y;
+    ctx.save();ctx.translate(px,py);ctx.scale(contact.scale,contact.scale);const stride=Math.sin(state.runClock*17)*4;
     if(state.effects.some(e=>e.kind==='heart')){ctx.fillStyle='rgba(255,100,193,.17)';ctx.beginPath();ctx.arc(0,0,36,0,Math.PI*2);ctx.fill();}
     ctx.globalAlpha=state.invulnerable>0?.78:1;
     ctx.strokeStyle='#ffc4dd';ctx.lineWidth=7;ctx.lineCap='round';
@@ -240,11 +254,11 @@
     ctx.fillStyle='#fff';ctx.font='bold 15px system-ui';ctx.textAlign='center';ctx.fillText('К',0,14);ctx.restore();
     for(const e of state.effects){
       const t=e.age/CONFIG.effectDuration,ex=roadX(e.lane,CONFIG.contactZ),ey=py;
-      ctx.save();ctx.globalAlpha=1-t;
+      ctx.save();ctx.translate(ex,ey);ctx.scale(contact.scale,contact.scale);ctx.globalAlpha=1-t;
       if(e.kind==='heart'){
-        ctx.font=`bold ${20+t*16}px system-ui`;ctx.fillStyle='#fff1fa';ctx.textAlign='center';ctx.shadowColor='#ff3ca5';ctx.shadowBlur=12;ctx.fillText('+1',ex+22,ey-35-t*32);
-        for(let i=0;i<6;i++){const angle=i*Math.PI/3;ctx.fillStyle=i%2?'#fff':'#ff69bc';ctx.beginPath();ctx.arc(ex+Math.cos(angle)*(10+t*32),ey-12+Math.sin(angle)*(10+t*32),3*(1-t)+.5,0,Math.PI*2);ctx.fill();}
-      }else{ctx.strokeStyle='#ff8b8b';ctx.lineWidth=5*(1-t);ctx.beginPath();ctx.arc(ex,ey,20+t*25,0,Math.PI*2);ctx.stroke();}
+        ctx.font=`bold ${20+t*16}px system-ui`;ctx.fillStyle='#fff1fa';ctx.textAlign='center';ctx.shadowColor='#ff3ca5';ctx.shadowBlur=12;ctx.fillText('+1',22,-35-t*32);
+        for(let i=0;i<6;i++){const angle=i*Math.PI/3;ctx.fillStyle=i%2?'#fff':'#ff69bc';ctx.beginPath();ctx.arc(Math.cos(angle)*(10+t*32),-12+Math.sin(angle)*(10+t*32),3*(1-t)+.5,0,Math.PI*2);ctx.fill();}
+      }else{ctx.strokeStyle='#ff8b8b';ctx.lineWidth=5*(1-t);ctx.beginPath();ctx.arc(0,0,20+t*25,0,Math.PI*2);ctx.stroke();}
       ctx.restore();
     }
     if(DEBUG_MOTION){
